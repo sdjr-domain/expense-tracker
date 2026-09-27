@@ -2,7 +2,7 @@ import random
 
 from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
-from database.db import init_db, seed_db, get_db, get_user_by_email, get_user_by_id, get_spending_summary, get_category_totals, get_all_transactions, get_filtered_expenses_count, get_total_transaction_count, add_expense, add_income, delete_expense, update_expense, get_expense_by_id, add_category, get_user_categories, ensure_default_categories, update_category, delete_category, get_category_name, count_expenses_in_category, get_assets, get_asset_by_id, add_asset, update_asset, delete_asset, get_total_assets, get_financial_summary, get_analytics_summary, get_spending_trends, get_category_distribution, get_category_trends, get_spend_by_day_of_week, get_asset_metrics, get_previous_month_salary, set_category_limit, get_user_limits, get_income_by_id, update_income, delete_income, get_budget_adherence, get_spending_velocity, get_baseline_split
+from database.db import init_db, seed_db, get_db, get_user_by_email, get_user_by_id, get_spending_summary, get_category_totals, get_all_transactions, get_filtered_expenses_count, get_total_transaction_count, add_expense, add_income, delete_expense, update_expense, get_expense_by_id, add_category, get_user_categories, ensure_default_categories, update_category, delete_category, get_category_name, count_expenses_in_category, get_assets, get_asset_by_id, add_asset, update_asset, delete_asset, get_total_assets, get_financial_summary, get_analytics_summary, get_spending_trends, get_category_distribution, get_category_trends, get_spend_by_day_of_week, get_asset_metrics, get_previous_month_salary, get_current_month_salary, set_category_limit, get_user_limits, get_income_by_id, update_income, delete_income, get_budget_adherence, get_spending_velocity, get_baseline_split
 from functools import wraps
 
 # Category color mapping for the UI
@@ -655,7 +655,7 @@ def limits():
 
     # Fetch current limits and salary context
     user_limits = {row["category_name"]: row for row in get_user_limits(user_id)}
-    prev_salary = get_previous_month_salary(user_id)
+    curr_salary = get_current_month_salary(user_id)
 
     # We use the standard categories to ensure every category is shown
     # categories are derived from get_user_categories to support custom ones
@@ -674,7 +674,7 @@ def limits():
                 calculated_limit = l_val
                 display_limit = f"₹{l_val:,.2f}"
             else: # percentage
-                calculated_limit = (l_val / 100) * prev_salary
+                calculated_limit = (l_val / 100) * curr_salary
                 display_limit = f"{l_val}%"
 
             limit_data.append({
@@ -693,7 +693,7 @@ def limits():
                 "display_limit": "No limit set"
             })
 
-    return render_template("limits.html", limits=limit_data, prev_salary=prev_salary)
+    return render_template("limits.html", limits=limit_data, curr_salary=curr_salary)
 
 @app.route("/limits/update", methods=["POST"])
 @login_required

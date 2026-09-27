@@ -19,8 +19,8 @@
                 </svg>
             </div>
             <div>
-                <p class="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-0.5">Last Month's Total Salary</p>
-                <p class="text-xl font-bold text-slate-900 dark:text-white">{{ '₹' + prev_salary|indian_format if prev_salary > 0 else 'No salary record found' }}</p>
+                <p class="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-0.5">Current Month's Total Salary</p>
+                <p class="text-xl font-bold text-slate-900 dark:text-white">{{ '₹' + curr_salary|indian_format if curr_salary > 0 else 'No salary record found' }}</p>
             </div>
         </div>
     </header>

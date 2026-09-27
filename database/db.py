@@ -127,16 +127,12 @@ def get_filtered_expenses_count(user_id, category=None, start_date=None, end_dat
 def get_all_transactions(user_id, category=None, start_date=None, end_date=None, sort=None, limit=None, offset=None):
     """Returns a combined list of income and expenses for a user with optional filters, sorting, and pagination."""
     with get_db() as db:
-        # We use a UNION ALL to combine income and expenses
-        # We add a 'type' column to distinguish between the two
         query = """
             SELECT 'income' as type, id, amount, category, date, description FROM income WHERE user_id = ?
             UNION ALL
             SELECT 'expense' as type, id, amount, category, date, description FROM expenses WHERE user_id = ?
         """
         params = [user_id, user_id]
-
-        # To apply filters and sorting to the combined result, we wrap it in a subquery
         filtered_query = f"SELECT * FROM ({query}) AS transactions WHERE 1=1"
 
         if category and category != "All":
@@ -169,11 +165,9 @@ def get_all_transactions(user_id, category=None, start_date=None, end_date=None,
 
         return db.execute(filtered_query, params).fetchall()
 
-
 def get_analytics_summary(user_id, start_date, end_date):
     """Returns a summary of financial KPIs for a user within a date range."""
     with get_db() as db:
-        # Total Expenses
         exp_row = db.execute(
             "SELECT SUM(amount) as total, MAX(amount) as max_val FROM expenses WHERE user_id = ? AND date >= ? AND date <= ?",
             (user_id, start_date, end_date)
@@ -181,22 +175,18 @@ def get_analytics_summary(user_id, start_date, end_date):
         total_expenses = exp_row["total"] if exp_row["total"] else 0
         largest_transaction = exp_row["max_val"] if exp_row["max_val"] else 0
 
-        # Total Income
         inc_row = db.execute(
             "SELECT SUM(amount) as total FROM income WHERE user_id = ? AND date >= ? AND date <= ?",
             (user_id, start_date, end_date)
         ).fetchone()
         total_income = inc_row["total"] if inc_row["total"] else 0
 
-        # Net Savings & Rate
         net_savings = total_income - total_expenses
         savings_rate = (net_savings / total_income * 100) if total_income > 0 else 0
 
-        # Avg Daily Spend
         days_diff = (datetime.strptime(end_date, "%Y-%m-%d") - datetime.strptime(start_date, "%Y-%m-%d")).days + 1
         avg_daily_spend = total_expenses / days_diff if days_diff > 0 else 0
 
-        # Busiest Day
         busiest = db.execute(
             "SELECT date FROM expenses WHERE user_id = ? AND date >= ? AND date <= ? GROUP BY date ORDER BY SUM(amount) DESC LIMIT 1",
             (user_id, start_date, end_date)
@@ -214,12 +204,13 @@ def get_analytics_summary(user_id, start_date, end_date):
         }
 
 def get_budget_adherence(user_id, start_date, end_date):
-    """Returns actual spend vs budget limit for each category."""
+    """Returns actual spend vs budget limit for each category, showing the full monthly limit."""
     with get_db() as db:
-        # Get all limits for the user
-        limits = db.execute("SELECT category_name, limit_value FROM category_limits WHERE user_id = ?", (user_id,)).fetchall()
+        # Use current month's total income as the base for percentage limits
+        monthly_base_income = get_current_month_salary(user_id)
 
-        # Get actual spend per category for the range
+        limits = db.execute("SELECT category_name, limit_type, limit_value FROM category_limits WHERE user_id = ?", (user_id,)).fetchall()
+
         spend = db.execute(
             "SELECT category, SUM(amount) as total FROM expenses WHERE user_id = ? AND date >= ? AND date <= ? GROUP BY category",
             (user_id, start_date, end_date)
@@ -229,12 +220,26 @@ def get_budget_adherence(user_id, start_date, end_date):
         adherence = []
         for lim in limits:
             cat = lim["category_name"]
-            limit_val = lim["limit_value"]
+            l_type = lim["limit_type"]
+            l_val = lim["limit_value"]
+
+            if l_type == "fixed":
+                monthly_limit = l_val
+            else:
+                monthly_limit = (l_val / 100) * monthly_base_income
+
+            # Removed range scaling - always use the full monthly limit
+            scaled_limit = monthly_limit
             actual_val = spend_map.get(cat, 0)
-            percent = (actual_val / limit_val * 100) if limit_val > 0 else 0
+
+            if scaled_limit <= 0:
+                percent = 0.0 if actual_val == 0 else 100.0
+            else:
+                percent = (actual_val / scaled_limit * 100)
+
             adherence.append({
                 "category": cat,
-                "limit": limit_val,
+                "limit": round(scaled_limit, 2),
                 "actual": actual_val,
                 "percent": round(percent, 2)
             })
@@ -246,7 +251,6 @@ def get_spending_velocity(user_id):
         today = datetime.now()
         first_of_month = today.replace(day=1)
 
-        # Current Month Daily Average
         curr_month_row = db.execute(
             "SELECT SUM(amount) as total FROM expenses WHERE user_id = ? AND date >= ?",
             (user_id, first_of_month.strftime("%Y-%m-%d"))
@@ -255,7 +259,6 @@ def get_spending_velocity(user_id):
         days_elapsed = (today - first_of_month).days + 1
         curr_daily_avg = curr_total / days_elapsed
 
-        # Historical Daily Average (last 90 days)
         ninety_days_ago = (today - timedelta(days=90)).strftime("%Y-%m-%d")
         hist_row = db.execute(
             "SELECT SUM(amount) as total FROM expenses WHERE user_id = ? AND date >= ?",
@@ -277,87 +280,6 @@ def get_spending_velocity(user_id):
 def get_baseline_split(user_id, start_date, end_date):
     """Returns totals for essential vs discretionary spending."""
     with get_db() as db:
-        # Join expenses with categories to check is_essential flag
-        row = db.execute("""
-            SELECT
-                SUM(CASE WHEN c.is_essential = 1 THEN e.amount ELSE 0 END) as essential,
-                SUM(CASE WHEN c.is_essential = 0 THEN e.amount ELSE 0 END) as discretionary
-            FROM expenses e
-            JOIN categories c ON e.category = c.name AND e.user_id = c.user_id
-            WHERE e.user_id = ? AND e.date >= ? AND e.date <= ?
-        """, (user_id, start_date, end_date)).fetchone()
-
-        return {
-            "essential": row["essential"] if row["essential"] else 0,
-            "discretionary": row["discretionary"] if row["discretionary"] else 0
-        }
-
-
-def get_budget_adherence(user_id, start_date, end_date):
-    """Returns actual spend vs budget limit for each category."""
-    with get_db() as db:
-        # Get all limits for the user
-        limits = db.execute("SELECT category_name, limit_value FROM category_limits WHERE user_id = ?", (user_id,)).fetchall()
-
-        # Get actual spend per category for the range
-        spend = db.execute(
-            "SELECT category, SUM(amount) as total FROM expenses WHERE user_id = ? AND date >= ? AND date <= ? GROUP BY category",
-            (user_id, start_date, end_date)
-        ).fetchall()
-        spend_map = {row["category"]: row["total"] for row in spend}
-
-        adherence = []
-        for lim in limits:
-            cat = lim["category_name"]
-            limit_val = lim["limit_value"]
-            actual_val = spend_map.get(cat, 0)
-            percent = (actual_val / limit_val * 100) if limit_val > 0 else 0
-            adherence.append({
-                "category": cat,
-                "limit": limit_val,
-                "actual": actual_val,
-                "percent": round(percent, 2)
-            })
-        return adherence
-
-def get_spending_velocity(user_id):
-    """Calculates spending velocity: current daily avg vs historical daily avg."""
-    with get_db() as db:
-        today = datetime.now()
-        first_of_month = today.replace(day=1)
-
-        # Current Month Daily Average
-        curr_month_row = db.execute(
-            "SELECT SUM(amount) as total FROM expenses WHERE user_id = ? AND date >= ?",
-            (user_id, first_of_month.strftime("%Y-%m-%d"))
-        ).fetchone()
-        curr_total = curr_month_row["total"] if curr_month_row["total"] else 0
-        days_elapsed = (today - first_of_month).days + 1
-        curr_daily_avg = curr_total / days_elapsed
-
-        # Historical Daily Average (last 90 days)
-        ninety_days_ago = (today - timedelta(days=90)).strftime("%Y-%m-%d")
-        hist_row = db.execute(
-            "SELECT SUM(amount) as total FROM expenses WHERE user_id = ? AND date >= ?",
-            (user_id, ninety_days_ago)
-        ).fetchone()
-        hist_total = hist_row["total"] if hist_row["total"] else 0
-        hist_daily_avg = hist_total / 90
-
-        diff_percent = 0
-        if hist_daily_avg > 0:
-            diff_percent = ((curr_daily_avg - hist_daily_avg) / hist_daily_avg) * 100
-
-        return {
-            "current_daily_avg": round(curr_daily_avg, 2),
-            "historical_daily_avg": round(hist_daily_avg, 2),
-            "velocity_percent": round(diff_percent, 2)
-        }
-
-def get_baseline_split(user_id, start_date, end_date):
-    """Returns totals for essential vs discretionary spending."""
-    with get_db() as db:
-        # Join expenses with categories to check is_essential flag
         row = db.execute("""
             SELECT
                 SUM(CASE WHEN c.is_essential = 1 THEN e.amount ELSE 0 END) as essential,
@@ -375,8 +297,6 @@ def get_baseline_split(user_id, start_date, end_date):
 def get_spending_trends(user_id, start_date, end_date, bucket='day', category=None):
     """Returns time-series data for income and expenses."""
     with get_db() as db:
-        # Map bucket to SQLite date modifier
-        # 'day' is just date, 'week' is strftime('%Y-%W'), 'month' is strftime('%Y-%m')
         fmt = {"day": "%Y-%m-%d", "week": "%Y-%W", "month": "%Y-%m"}.get(bucket, "%Y-%m-%d")
 
         exp_query = f"SELECT strftime('{fmt}', date) as period, SUM(amount) as total FROM expenses WHERE user_id = ?"
@@ -391,55 +311,46 @@ def get_spending_trends(user_id, start_date, end_date, bucket='day', category=No
         expenses = {row["period"]: row["total"] for row in db.execute(exp_query, exp_params).fetchall()}
         income = {row["period"]: row["total"] for row in db.execute(inc_query, (user_id, start_date, end_date)).fetchall()}
 
-        # Combine and sort by period
         all_periods = sorted(set(expenses.keys()) | set(income.keys()))
         return [{"period": p, "expense": expenses.get(p, 0), "income": income.get(p, 0)} for p in all_periods]
 
 def get_category_distribution(user_id, start_date, end_date):
     """Returns expense distribution by category, including categories with zero spend."""
     with get_db() as db:
-        # First, get all categories the user has
         user_cats = db.execute("SELECT name FROM categories WHERE user_id = ?", (user_id,)).fetchall()
         cat_names = [row["name"] for row in user_cats]
 
-        # Now get the actual spend
         spend_data = db.execute(
             "SELECT category, SUM(amount) as total, COUNT(*) as count FROM expenses WHERE user_id = ? AND date >= ? AND date <= ? GROUP BY category ORDER BY total DESC",
             (user_id, start_date, end_date)
         ).fetchall()
 
-        # Create a map for quick lookup
         spend_map = {row["category"]: row for row in spend_data}
 
-        # Return all user categories, filling in 0 for those without spend
         results = []
         for name in cat_names:
             if name in spend_map:
                 results.append(spend_map[name])
             else:
-                # Create a row-like object (sqlite3.Row replacement)
-                # Using a simple dict since fetchall() returns a list of Rows, but the app handles dicts in API
                 results.append({
                     "category": name,
                     "total": 0,
                     "count": 0
                 })
 
-        # Sort by total descending, then by name
         return sorted(results, key=lambda x: (-x["total"], x["category"]))
 
 def get_category_trends(user_id, start_date, end_date):
     """Returns spending per category per month."""
     with get_db() as db:
         return db.execute(
-            "SELECT strftime('%Y-%m', date) as month, category, SUM(amount) as total FROM expenses WHERE user_id = ? AND date >= ? AND date <= ? GROUP BY month, category ORDER BY month ASC",
+            "SELECT strftime('%Y-%m', date) as month, category, SUM(amount) as total FROM expenses WHERE user_id = ? AND date >= ? AND date <= ? GROUP BY month, category ORDER by month ASC",
             (user_id, start_date, end_date)
         ).fetchall()
 
 def get_spend_by_day_of_week(user_id, start_date, end_date):
     """Returns spending aggregated by day of the week (0=Sunday)."""
     with get_db() as db:
-        # strftime('%w') returns 0-6
         return db.execute(
             "SELECT strftime('%w', date) as dow, SUM(amount) as total FROM expenses WHERE user_id = ? AND date >= ? AND date <= ? GROUP BY dow ORDER BY dow ASC",
             (user_id, start_date, end_date)
@@ -448,13 +359,11 @@ def get_spend_by_day_of_week(user_id, start_date, end_date):
 def get_asset_metrics(user_id):
     """Returns total asset growth and allocation."""
     with get_db() as db:
-        # Growth over time
         growth = db.execute(
             "SELECT date, SUM(amount) OVER (ORDER BY date) as total FROM assets WHERE user_id = ? ORDER BY date ASC",
             (user_id,)
         ).fetchall()
 
-        # Allocation by type
         allocation = db.execute(
             "SELECT type, SUM(amount) as total FROM assets WHERE user_id = ? GROUP BY type ORDER BY total DESC",
             (user_id,)
@@ -464,6 +373,19 @@ def get_asset_metrics(user_id):
             "growth": [{"date": row["date"], "total": row["total"]} for row in growth],
             "allocation": [{"type": row["type"], "total": row["total"]} for row in allocation]
         }
+
+def get_current_month_salary(user_id):
+    """Sums all income for the current calendar month."""
+    today = datetime.now()
+    first_of_month = today.replace(day=1).strftime("%Y-%m-%d")
+    today_str = today.strftime("%Y-%m-%d")
+
+    with get_db() as db:
+        row = db.execute(
+            "SELECT SUM(amount) as total FROM income WHERE user_id = ? AND date BETWEEN ? AND ?",
+            (user_id, first_of_month, today_str)
+        ).fetchone()
+        return row["total"] if row["total"] else 0
 
 def get_previous_month_salary(user_id):
     """Sums all income for the previous calendar month."""
@@ -497,7 +419,6 @@ def get_user_limits(user_id):
     """Retrieves all category limits for a user."""
     with get_db() as db:
         return db.execute("SELECT * FROM category_limits WHERE user_id = ?", (user_id,)).fetchall()
-
 
 def add_expense(db, user_id, amount, category, date, description):
     """Adds a new expense record for a user."""
@@ -690,10 +611,10 @@ def init_db():
                 type TEXT NOT NULL,
                 amount REAL NOT NULL,
                 date TEXT NOT NULL,
+                description TEXT,
                 maturity_date TEXT,
                 interest_rate REAL,
                 maturity_amount REAL,
-                description TEXT,
                 created_at TEXT DEFAULT (datetime('now')),
                 FOREIGN KEY (user_id) REFERENCES users (id)
             )
@@ -767,7 +688,6 @@ def seed_yearly_data(user_id=None):
 
         current_date = start_date
         while current_date <= end_date:
-            # Random number of expenses per day (0 to 3)
             for _ in range(random.randint(0, 3)):
                 cat_name = random.choice(list(categories.keys()))
                 min_amt, max_amt, *descriptions = categories[cat_name]
